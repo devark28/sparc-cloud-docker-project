@@ -1,0 +1,103 @@
+services:
+  # Traefik Reverse Proxy Service
+  proxy:
+    image: traefik:v3.0
+    container_name: todo-reverse-proxy
+    restart: always
+    # Listens on host port 80 (and hooks into the Docker engine API)
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro # Allows Traefik to read Docker container metadata
+    command:
+      - "--providers.docker=true" # Automatically configures based on container labels
+      - "--providers.docker.exposedbydefault=false" # Security measure: only route if explicitly asked
+      - "--entrypoints.web.address=:80" # Defines an entry point on port 80 named "web"
+
+  db:
+    image: mysql:8.0
+    container_name: todo-mysql-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root_secret_pass
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_secret_pass"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: todo-database-ui
+    restart: always
+    environment:
+      PMA_HOST: db # Configures phpMyAdmin to look for the database service container name
+    depends_on:
+      db:
+        condition: service_healthy # Ensures database tables are initialized before the UI launches
+    labels:
+      - "traefik.enable=true"
+      # Satisfies Requirement 2: Configures Traefik to look explicitly for the "db.localhost" subdomain
+      - "traefik.http.routers.phpmyadmin.rule=Host(`db.localhost`)"
+      - "traefik.http.routers.phpmyadmin.entrypoints=web"
+      # Points directly to phpMyAdmin's internal container web port
+      - "traefik.http.services.phpmyadmin.loadbalancer.server.port=80"
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final
+    container_name: todo-backend-app
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      MYSQL_HOST: db
+      NODE_ENV: development
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      # Satisfies Requirement 1: Intercepts anything hitting http://localhost/api
+      - "traefik.http.routers.backend.rule=Host(`localhost`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.backend.entrypoints=web"
+      - "traefik.http.services.backend.loadbalancer.server.port=3000"
+
+  # Frontend Service (Handles local React development & Hot Module Replacement)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: client-builder # Intercepts the multi-stage build at the client-builder runtime layer
+    container_name: todo-frontend-dev
+    ports:
+      - "5173:5173" # Exposes the React dev server port (e.g., Vite/CRA)
+    command: npm run dev -- --host 0.0.0.0 # Tells the dev server to accept connections from outside the container
+    environment:
+      - CHOKIDAR_USEPOLLING=true # Forces file watch engine to work reliably inside Docker volumes
+    develop:
+      watch:
+        - action: sync
+          path: ./client
+          target: /client
+          ignore:
+            - client/node_modules/
+    labels:
+      - "traefik.enable=true"
+      # Satisfies Requirement 2: Sends all other standard paths to the frontend runtime
+      - "traefik.http.routers.frontend.rule=Host(`localhost`) && PathPrefix(`/`)"
+      - "traefik.http.routers.frontend.entrypoints=web"
+      - "traefik.http.services.frontend.loadbalancer.server.port=5173"
+      # Gives backend traffic priority over the generic frontend root rule
+      - "traefik.http.routers.frontend.priority=1"
+      - "traefik.http.routers.backend.priority=2"
+
+volumes:
+  mysql_data:
+

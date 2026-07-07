@@ -1,0 +1,38 @@
+# 1. CLIENT BUILDER STAGE
+FROM node:22-slim AS client-builder
+WORKDIR /client
+COPY client/package*.json ./
+RUN npm ci
+COPY client/ .
+RUN npm run build
+
+# 2. TESTER STAGE (Deliberate Failure Gate)
+FROM node:22-slim AS tester
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-setuptools make g++
+WORKDIR /app
+COPY backend/package*.json ./
+# sqlite3's install script is: prebuild-install -r napi || node-gyp rebuild
+# prebuild-install always downloads the prebuilt linux-x64 binary (built on glibc 2.38+),
+# which fails at runtime on Bookworm's glibc 2.36.
+# --ignore-scripts skips the install script entirely (no download).
+# We then call node-gyp directly — it only compiles from source, no download attempt.
+# The result links against this container's glibc 2.36 and runs fine here.
+RUN npm ci --ignore-scripts && \
+    (cd node_modules/sqlite3 && ../.bin/node-gyp rebuild)
+COPY backend/ .
+ENV SQLITE_DB_LOCATION="./todo.db"
+RUN npm test
+
+# 3. FINAL PRODUCTION RELEASE
+FROM node:22-slim AS release
+WORKDIR /app
+# This COPY is the gate: if npm test failed above, the tester stage failed,
+# and this line crashes the build — production cannot be built without passing tests.
+COPY --from=tester /app/node_modules ./node_modules
+COPY backend/package*.json ./
+COPY backend/ .
+# Remove devDependencies (jest, nodemon, prettier) from the copied node_modules.
+RUN npm prune --omit=dev
+COPY --from=client-builder /client/dist/ ./src/static/
+EXPOSE 3000
+CMD ["node", "src/index.js"]
