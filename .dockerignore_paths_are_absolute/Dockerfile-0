@@ -1,0 +1,33 @@
+# Stage 1: Build the React frontend
+FROM node:20-alpine AS client-build
+
+WORKDIR /app/client
+
+COPY client/package*.json .
+
+RUN npm ci
+
+COPY client .
+
+RUN npm run build
+
+# Stage 2: Build the backend and bundle the frontend into it
+FROM node:20-alpine AS final
+
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /app
+
+COPY backend/package*.json .
+
+# RUN npm ci --ignore-scripts
+RUN npm ci --ignore-scripts && npm rebuild sqlite3
+
+COPY backend .
+
+# Copy the compiled frontend into the directory the backend serves as static files
+COPY --from=client-build /app/client/dist ./src/static
+
+EXPOSE 3000 
+
+CMD [ "node", "src/index.js" ]

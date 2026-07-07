@@ -1,0 +1,37 @@
+# 1. CLIENT BUILDER STAGE
+FROM node:22-slim AS client-builder
+WORKDIR /client
+COPY client/package*.json ./
+RUN npm ci
+COPY client/ .
+RUN npm run build
+
+# 2. TESTER STAGE (Deliberate Failure Gate)
+FROM node:22-slim AS tester
+WORKDIR /app
+RUN apt-get update && apt-get install python3 python3-setuptools make g++ -y --no-install-recommends
+COPY backend/package*.json ./
+# RUN npm_config_build_from_source=true 
+RUN npm i --build-from-source #--ignore-scripts
+#RUN npm rebuild sqlite3 --build-from-source
+COPY backend/ .
+ENV SQLITE_DB_LOCATION="./todo.db"
+RUN npm test
+
+# 3. FINAL PRODUCTION RELEASE
+FROM node:22-slim AS release
+# RUN apk add --no-cache python3
+WORKDIR /app
+# If tests fail, Docker will crash right here trying to evaluate this link.
+#COPY --from=tester /app/package.json ./package.json
+COPY --from=tester /app/node_modules ./node_modules
+COPY backend/package*.json ./
+# Securely install production tools and block scripts
+#RUN npm ci --omit=dev
+COPY backend/ .
+
+# Copy the built client assets into your backend static folder
+COPY --from=client-builder /client/dist/ ./src/static/
+EXPOSE 3000
+
+CMD ["npm", "run", "dev"]
